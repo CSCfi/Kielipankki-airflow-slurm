@@ -23,6 +23,7 @@ from airflow.exceptions import AirflowSkipException
 from airflow.models.baseoperator import BaseOperator
 from airflow.utils.context import Context
 from airflow.utils.operator_helpers import context_to_airflow_vars
+from airflow.providers.ssh.hooks.ssh import SSHHook
 
 from airflow_slurm.constants import SCONTROL_COMPLETED_OK
 from airflow_slurm.constants import SCONTROL_FAILED
@@ -58,27 +59,28 @@ class SSHSlurmOperator(BaseOperator):
         self,
         *,
         command: str,
-        # TODO: this is useless at this point,
-        # I'll leave it here to avoid breaking changes
         ssh_conn_id: str,
         tdelta_between_checks: int = 5,
         slurm_options: dict[str, Any] | None = None,
         modules: list[str] | None = None,
         setup_commands: list[str] | None = None,
+        submit_on_host: bool = False,
         host_environment_preamble: str = "",
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.command = command
-        self.ssh_conn_id = ssh_conn_id
+        self.ssh_conn_id=ssh_conn_id
+        self.ssh_hook = SSHHook(ssh_conn_id=ssh_conn_id)
         self.slurm_options = slurm_options
         self.tdelta_between_checks = tdelta_between_checks
         self.modules = modules
         self.setup_commands = setup_commands
+        self.submit_on_host = submit_on_host
         self.host_environment_preamble = host_environment_preamble
         # This will be interpolated with other commands given to bash
-        if self.host_environment_preamble != '':
-            self.host_environment_preamble += ';'
+        if self.host_environment_preamble != "":
+            self.host_environment_preamble += ";"
 
     def parse_input_and_render_slurm_script(self, context: Context) -> str:
         """Render the SLURM script using the Jinja2 template and the operator's
@@ -140,15 +142,31 @@ class SSHSlurmOperator(BaseOperator):
         try:
             self.log.info(f"Running script:\n{slurm_script}")
 
-            process = subprocess.Popen(  # nosec
-                ["bash", "-l", "-c", f"{self.host_environment_preamble} sbatch --parsable"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            output, error = process.communicate(input=slurm_script)
-            exit_code = process.returncode
+            if self.submit_on_host:
+                with self.ssh_hook.get_conn() as client:
+                    command=f'/bin/bash -lc "{self.host_environment_preamble} sbatch --parsable"'
+                    stdin, stdout, stderr = client.exec_command(command)
+                    stdin.write(slurm_script)
+                    stdin.flush(); stdin.close()
+                    # exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
+                    #     ssh_client=client,
+                    #     command=f'/bin/bash -lc "{self.host_environment_preamble} sbatch --parsable"',
+                    #     environment={},
+                    #     get_pty=True,
+                    # )
+                    output = stdout.read().strip()
+                    error = stderr.read().strip()
+                    exit_code = stdout.channel.recv_exit_status()
+            else:
+                process = subprocess.Popen(
+                    ["bash", "-l", "-c", f"{self.host_environment_preamble} sbatch --parsable"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                output, error = process.communicate(input=slurm_script)
+                exit_code = process.returncode
 
             self.log.debug(f"{output}")
 
@@ -168,6 +186,8 @@ class SSHSlurmOperator(BaseOperator):
                     job_id,
                     ssh_conn_id=self.ssh_conn_id,
                     tdelta_between_pokes=self.tdelta_between_checks,
+                    host_environment_preamble=self.host_environment_preamble,
+                    submit_on_host=self.submit_on_host
                 ),
                 method_name="new_slurm_state_log",
             )
@@ -199,16 +219,27 @@ class SSHSlurmOperator(BaseOperator):
         command = (
             f"bash -l -c '{self.host_environment_preamble} squeue -n {self.slurm_options['JOB_NAME']} -h -o %i'"
         )
-        process = subprocess.run(
-            command,
-            shell=True,  # nosec
-            capture_output=True,
-            text=True,
-        )
+        if self.submit_on_host:
+            with self.ssh_hook.get_conn() as client:
+                exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
+                    ssh_client=client,
+                    command=command,
+                    environment={},
+                    get_pty=True,
+                )
+                output = stdout.decode().strip()
+                error = stderr.decode().strip()
+        else:
+            process = subprocess.run(
+                command,
+                shell=True,  # nosec
+                capture_output=True,
+                text=True,
+            )
 
-        stdout = process.stdout
-        stderr = process.stderr
-        exit_code = process.returncode
+            stdout = process.stdout
+            stderr = process.stderr
+            exit_code = process.returncode
 
         # Log and handle errors
         if exit_code > 0:
@@ -262,6 +293,8 @@ class SSHSlurmOperator(BaseOperator):
                     last_known_state=event["slurm_job"]["state"],
                     last_known_log_lines=event["log_number_lines"],
                     tdelta_between_pokes=self.tdelta_between_checks,
+                    host_environment_preamble=self.host_environment_preamble,
+                    submit_on_host=self.submit_on_host
                 ),
                 method_name="new_slurm_state_log",
             )
