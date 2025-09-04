@@ -22,6 +22,7 @@ from typing import Iterable
 from airflow.exceptions import AirflowException
 from airflow.triggers.base import BaseTrigger
 from airflow.triggers.base import TriggerEvent
+from airflow.providers.ssh.hooks.ssh import SSHHook
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -43,6 +44,8 @@ class SSHSlurmTrigger(BaseTrigger):
         last_known_state: str | None = None,
         last_known_log_lines: int = 0,
         tdelta_between_pokes: int = 20,
+        submit_on_host: bool = False,
+        host_environment_preamble: str = "",
         **kwargs,
     ):
         """
@@ -54,11 +57,12 @@ class SSHSlurmTrigger(BaseTrigger):
         super().__init__()
         self.jobid = jobid
         self.ssh_conn_id = ssh_conn_id
+        self.ssh_hook = SSHHook(ssh_conn_id=ssh_conn_id)
         # FIXME:
         # Initialising with safe-ish values. This should be improved, e.g.,
         # by capturing the output of the job submission call.
         self.last_full_state = {
-            "job_id": jobid,
+            "jobid": jobid,
             "job_name": "unknown",
             "state": "unknown",
             "reason": "unknown",
@@ -68,31 +72,50 @@ class SSHSlurmTrigger(BaseTrigger):
         self.last_known_state = last_known_state
         self.last_known_log_lines = last_known_log_lines
         self.tdelta_between_pokes = tdelta_between_pokes
+        self.host_environment_preamble = host_environment_preamble
+        self.submit_on_host = submit_on_host
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         return (
             "airflow_slurm.ssh_slurm_trigger.SSHSlurmTrigger",
             {
-                "job_id": self.jobid,
                 "jobid": self.jobid,
                 "ssh_conn_id": self.ssh_conn_id,
                 "last_known_state": self.last_known_state,
                 "last_known_log_lines": self.last_known_log_lines,
                 "tdelta_between_pokes": self.tdelta_between_pokes,
+                "host_environment_preamble": self.host_environment_preamble,
+                "submit_on_host": self.submit_on_host,
             },
         )
 
-    async def get_scontrol_output(self) -> dict | None:
-        proc = await asyncio.create_subprocess_shell(
-            f"bash --login -c 'scontrol --oneliner show job {self.jobid}'",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+    async def run_ssh_command(self, command):
+        def _exec_command():
+            with self.ssh_hook.get_conn() as client:
+                stdin, stdout, stderr = client.exec_command(command)
+                stdin.close()
+                output = stdout.read().decode("utf-8").strip()
+                error = stderr.read().decode("utf-8").strip()
+                exit_code = stdout.channel.recv_exit_status()
+                return output, error, exit_code
 
-        stdout, stderr = await proc.communicate()
-        output = stdout.decode().strip()
-        error = stderr.decode().strip()
-        exit_code = proc.returncode
+        return await asyncio.to_thread(_exec_command)
+
+    async def get_scontrol_output(self) -> dict | None:
+        command = f"bash -lc '{self.host_environment_preamble} scontrol --oneliner show job {self.jobid}'"
+        if self.submit_on_host:
+            output, error, exit_code = await self.run_ssh_command(command)
+        else:
+            proc = await asyncio.create_subprocess_shell(
+                (command,),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await proc.communicate()
+            output = stdout.decode().strip()
+            error = stderr.decode().strip()
+            exit_code = proc.returncode
 
         if exit_code == 0 and len(output) > 0:
             if not output:
@@ -108,7 +131,7 @@ class SSHSlurmTrigger(BaseTrigger):
             out["JobState"] = array_status
             self.last_full_state = out
             return {
-                "job_id": out["JobId"],
+                "jobid": out["JobId"],
                 "job_name": out["JobName"],
                 "state": out["JobState"],
                 "reason": out["Reason"],
@@ -119,18 +142,23 @@ class SSHSlurmTrigger(BaseTrigger):
             logger.warning("scontrol returned %s with error %s.", exit_code, error)
             logger.warning("scontrol output", output)
             try:
-                proc = await asyncio.create_subprocess_shell(
-                    f"bash --login -c 'sacct --noheader -j {self.jobid}'",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                exit_code = proc.returncode
-                stdout, stderr = await proc.communicate()
+                command = f"bash -lc '{self.host_environment_preamble} sacct --noheader -j {self.jobid}'"
+                if self.submit_on_host:
+                    output, error, exit_code = await self.run_ssh_command(command)
+                    output = output.decode("utf-8").strip().splitlines()
+                else:
+                    proc = await asyncio.create_subprocess_shell(
+                        command=command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await proc.communicate()
+                    exit_code = proc.returncode
+                    output = stdout.decode().strip().splitlines()
                 if exit_code != 0:
                     error = stderr.decode().strip()
                     logger.warning(error)
                     raise RuntimeError("sacct returned %s: %s", exit_code, error)
-                output = stdout.decode().strip().splitlines()
                 is_completed = all("COMPLETED" in line for line in output)
             except RuntimeError:
                 logger.warning(
@@ -185,15 +213,20 @@ class SSHSlurmTrigger(BaseTrigger):
     async def cancel_remaining_jobs(self, records):
         ids = tuple(r["JobId"] for r in records if r["JobState"] != "FAILED")
         logger.error(f"Cancelling pending jobs of failed array: {ids}")
-        proc = await asyncio.create_subprocess_shell(
-            f"bash --login -c 'scancel {' '.join(ids)}'",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        output = stdout.decode().strip()
-        error = stderr.decode().strip()
-        exit_code = proc.returncode
+        command = f"bash -lc '{self.host_environment_preamble} scancel {' '.join(ids)}'"
+        if self.submit_on_host:
+            output, error, exit_code = await self.run_ssh_command(command)
+        else:
+            proc = await asyncio.create_subprocess_shell(
+                command=command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await proc.communicate()
+            output = stdout.decode().strip()
+            error = stderr.decode().strip()
+            exit_code = proc.returncode
 
         if exit_code != 0:
             logger.error(f"Could not cancel jobs: {exit_code=}")
