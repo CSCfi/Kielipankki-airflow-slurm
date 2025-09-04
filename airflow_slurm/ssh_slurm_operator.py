@@ -65,6 +65,7 @@ class SSHSlurmOperator(BaseOperator):
         slurm_options: dict[str, Any] | None = None,
         modules: list[str] | None = None,
         setup_commands: list[str] | None = None,
+        host_environment_preamble: str = "",
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -74,6 +75,10 @@ class SSHSlurmOperator(BaseOperator):
         self.tdelta_between_checks = tdelta_between_checks
         self.modules = modules
         self.setup_commands = setup_commands
+        self.host_environment_preamble = host_environment_preamble
+        # This will be interpolated with other commands given to bash
+        if self.host_environment_preamble != '':
+            self.host_environment_preamble += ';'
 
     def parse_input_and_render_slurm_script(self, context: Context) -> str:
         """Render the SLURM script using the Jinja2 template and the operator's
@@ -136,7 +141,7 @@ class SSHSlurmOperator(BaseOperator):
             self.log.info(f"Running script:\n{slurm_script}")
 
             process = subprocess.Popen(  # nosec
-                ["bash", "-l", "-c", "sbatch", "--parsable"],
+                ["bash", "-l", "-c", f"{self.host_environment_preamble} sbatch --parsable"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -192,7 +197,7 @@ class SSHSlurmOperator(BaseOperator):
         )
 
         command = (
-            f"bash -l -c 'squeue -n {self.slurm_options['JOB_NAME']} -h -o %i'"
+            f"bash -l -c '{self.host_environment_preamble} squeue -n {self.slurm_options['JOB_NAME']} -h -o %i'"
         )
         process = subprocess.run(
             command,
