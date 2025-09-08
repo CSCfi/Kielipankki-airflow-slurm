@@ -39,7 +39,7 @@ def parse_scontrol_record(line):
 class SSHSlurmTrigger(BaseTrigger):
     def __init__(
         self,
-        jobid: str,
+        job_id: str,
         ssh_conn_id: str,
         last_known_state: str | None = None,
         last_known_log_lines: int = 0,
@@ -49,20 +49,20 @@ class SSHSlurmTrigger(BaseTrigger):
         **kwargs,
     ):
         """
-        :param jobid: the slurm's job id
+        :param job_id: the slurm's job id
         :param last_known_state: the last known slurm's state
         :param last_known_log_lines: how many lines did the log have IN TOTAL the last time we opened it?
         :param tdelta_between_pokes: how many SECONDS should we wait between checks of the log file & scontrol
         """
         super().__init__()
-        self.jobid = jobid
+        self.job_id = job_id
         self.ssh_conn_id = ssh_conn_id
         self.ssh_hook = SSHHook(ssh_conn_id=ssh_conn_id)
         # FIXME:
         # Initialising with safe-ish values. This should be improved, e.g.,
         # by capturing the output of the job submission call.
         self.last_full_state = {
-            "jobid": jobid,
+            "job_id": job_id,
             "job_name": "unknown",
             "state": "unknown",
             "reason": "unknown",
@@ -79,7 +79,7 @@ class SSHSlurmTrigger(BaseTrigger):
         return (
             "airflow_slurm.ssh_slurm_trigger.SSHSlurmTrigger",
             {
-                "jobid": self.jobid,
+                "job_id": self.job_id,
                 "ssh_conn_id": self.ssh_conn_id,
                 "last_known_state": self.last_known_state,
                 "last_known_log_lines": self.last_known_log_lines,
@@ -102,7 +102,7 @@ class SSHSlurmTrigger(BaseTrigger):
         return await asyncio.to_thread(_exec_command)
 
     async def get_scontrol_output(self) -> dict | None:
-        command = f"bash -lc '{self.host_environment_preamble} scontrol --oneliner show job {self.jobid}'"
+        command = f"bash -lc '{self.host_environment_preamble} scontrol --oneliner show job {self.job_id}'"
         if self.submit_on_host:
             output, error, exit_code = await self.run_ssh_command(command)
         else:
@@ -127,11 +127,11 @@ class SSHSlurmTrigger(BaseTrigger):
 
             array_status, records = await self.parse_scontrol(output.splitlines())
 
-            out = records[self.jobid.strip()]
+            out = records[self.job_id.strip()]
             out["JobState"] = array_status
             self.last_full_state = out
             return {
-                "jobid": out["JobId"],
+                "job_id": out["JobId"],
                 "job_name": out["JobName"],
                 "state": out["JobState"],
                 "reason": out["Reason"],
@@ -142,7 +142,7 @@ class SSHSlurmTrigger(BaseTrigger):
             logger.warning("scontrol returned %s with error %s.", exit_code, error)
             logger.warning("scontrol output", output)
             try:
-                command = f"bash -lc '{self.host_environment_preamble} sacct --noheader -j {self.jobid}'"
+                command = f"bash -lc '{self.host_environment_preamble} sacct --noheader -j {self.job_id}'"
                 if self.submit_on_host:
                     output, error, exit_code = await self.run_ssh_command(command)
                     output = output.decode("utf-8").strip().splitlines()
@@ -170,7 +170,7 @@ class SSHSlurmTrigger(BaseTrigger):
             if is_completed:
                 out["state"] = "COMPLETED"
             else:
-                raise RuntimeError(f"Could not determine state of job {self.jobid}")
+                raise RuntimeError(f"Could not determine state of job {self.job_id}")
             return out
 
     async def parse_scontrol(
