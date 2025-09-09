@@ -71,7 +71,7 @@ class SSHSlurmOperator(BaseOperator):
     ) -> None:
         super().__init__(**kwargs)
         self.command = command
-        self.ssh_conn_id=ssh_conn_id
+        self.ssh_conn_id = ssh_conn_id
         self.ssh_hook = SSHHook(ssh_conn_id=ssh_conn_id)
         self.slurm_options = slurm_options
         self.tdelta_between_checks = tdelta_between_checks
@@ -150,12 +150,6 @@ class SSHSlurmOperator(BaseOperator):
                     stdin, stdout, stderr = client.exec_command(command)
                     stdin.write(slurm_script)
                     stdin.flush(); stdin.close()
-                    # exit_code, stdout, stderr = self.ssh_hook.exec_ssh_client_command(
-                    #     ssh_client=client,
-                    #     command=f'/bin/bash -lc "{self.host_environment_preamble} sbatch --parsable"',
-                    #     environment={},
-                    #     get_pty=True,
-                    # )
                     output = stdout.read().strip()
                     error = stderr.read().strip()
                     exit_code = stdout.channel.recv_exit_status()
@@ -229,8 +223,8 @@ class SSHSlurmOperator(BaseOperator):
                     environment={},
                     get_pty=True,
                 )
-                output = stdout.decode().strip()
-                error = stderr.decode().strip()
+                output = stdout.decode('utf-8').strip()
+                error = stderr.decode('utf-8').strip()
         else:
             process = subprocess.run(
                 command,
@@ -239,17 +233,17 @@ class SSHSlurmOperator(BaseOperator):
                 text=True,
             )
 
-            stdout = process.stdout
-            stderr = process.stderr
+            output = process.stdout.strip()
+            error = process.stderr.strip()
             exit_code = process.returncode
 
         # Log and handle errors
         if exit_code > 0:
             raise AirflowException(
-                f"Command execution failed. Exit code: {exit_code}. Error output: {stderr.strip()}"
+                f"Command execution failed. Exit code: {exit_code}. Error output: {error}"
             )
 
-        self.log.info(f"squeue stdout:\n{stdout.strip()}")
+        self.log.info(f"squeue stdout:\n{output}")
 
         if len(stdout.split()) > 0:
             raise AirflowSkipException(
