@@ -13,7 +13,8 @@
 # Original Copyright @ecodina and Michele Mastropietro
 # Modified by Andrea Recchia, 2024
 # Licence: GPLv3
-import subprocess  # nosec
+import subprocess
+import re
 from typing import Any
 from typing import Sequence
 
@@ -78,9 +79,10 @@ class SSHSlurmOperator(BaseOperator):
         self.setup_commands = setup_commands
         self.submit_on_host = submit_on_host
         self.host_environment_preamble = host_environment_preamble
-        # This will be interpolated with other commands given to bash
-        if self.host_environment_preamble != "":
-            self.host_environment_preamble += ";"
+        # This will be interpolated with other commands given to bash,
+        # we'll strip any control flow characters from the end and add a semicolon
+        if self.host_environment_preamble != '':
+            self.host_environment_preamble = re.sub(r'[;&|\s]*$', '', self.host_environment_preamble.strip()) + ';'
 
     def parse_input_and_render_slurm_script(self, context: Context) -> str:
         """Render the SLURM script using the Jinja2 template and the operator's
