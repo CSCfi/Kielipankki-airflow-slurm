@@ -142,7 +142,7 @@ class SSHSlurmOperator(BaseOperator):
         self.check_job_not_running(context)
 
         try:
-            self.log.info(f"Running script:\n{slurm_script}")
+            self.log.debug(f"Running script:\n{slurm_script}")
 
             if self.submit_on_host:
                 with self.ssh_hook.get_conn() as client:
