@@ -145,7 +145,7 @@ class SSHSlurmTrigger(BaseTrigger):
                 command = f"bash -lc '{self.host_environment_preamble} sacct --noheader -j {self.job_id}'"
                 if self.submit_on_host:
                     output, error, exit_code = await self.run_ssh_command(command)
-                    output = output.decode("utf-8").strip().splitlines()
+                    output = output.strip().splitlines()
                 else:
                     proc = await asyncio.create_subprocess_shell(
                         command=command,
@@ -155,8 +155,8 @@ class SSHSlurmTrigger(BaseTrigger):
                     stdout, stderr = await proc.communicate()
                     exit_code = proc.returncode
                     output = stdout.decode().strip().splitlines()
-                if exit_code != 0:
                     error = stderr.decode().strip()
+                if exit_code != 0:
                     logger.warning(error)
                     raise RuntimeError("sacct returned %s: %s", exit_code, error)
                 is_completed = all("COMPLETED" in line for line in output)
